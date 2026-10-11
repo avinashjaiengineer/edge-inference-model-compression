@@ -147,35 +147,44 @@ Paths are recorded as route templates, so arbitrary URLs can't explode label car
 | `PredictErrorRateHigh` | `/predict` 5xx rate > 1% | 5m |
 | `EdgeInferenceDown` | scrape target down | 1m |
 
-Alerts are evaluated by Prometheus and appear in the Prometheus UI and on the dashboard's alert panel. Alertmanager isn't included. To send notifications (Slack, email, PagerDuty), add an Alertmanager service and point `alerting:` in `prometheus.yml` at it.
+Alerts are evaluated by Prometheus and appear in the Prometheus UI and on the dashboard's alert timeline (built from Prometheus's `ALERTS` series). Alertmanager isn't included. To send notifications (Slack, email, PagerDuty), add an Alertmanager service and point `alerting:` in `prometheus.yml` at it.
 
-## Deployment: AWS EC2
+## Deployment: AWS EC2 (torn down)
 
-The full compose stack runs on one Amazon Linux 2023 `t3.small` in `us-east-1`. `deploy/ec2-user-data.sh` installs Docker at boot, and the Compose plugin (v2.29.7) is installed under `/usr/local/lib/docker/cli-plugins`.
+The full compose stack (API, Prometheus, Grafana) ran on one Amazon Linux 2023 `t3.small` in `us-east-1` on 2026-10-11. All the measurements in this README were taken there. Every resource was deleted when the project ended: the instance, its 20 GB disk, the security group and the key pair. Nothing is left running or billing.
 
-| Resource       | ID / name |
-|----------------|-----------|
-| Instance       | `i-05fdeb388164a394f` (tag `Name=edge-inference`), public IP `3.81.138.39` |
-| Security group | `sg-0dc4a94d524b24282` (`edge-inference-sg`). Ports 22, 8000, 9090 and 3000 are open to a single /32 only. |
-| Key pair       | `edge-inference` |
+To redeploy from scratch:
 
-Deploy or update from Git Bash in the project root. Set `MSYS_NO_PATHCONV=1` for any `aws` command, so Git Bash doesn't rewrite AWS paths.
+1. Launch an Amazon Linux 2023 instance (`t3.small` or larger) with `deploy/ec2-user-data.sh` as user data, which installs Docker.
+2. Install the Compose plugin under `/usr/local/lib/docker/cli-plugins`. It was v2.29.7 here.
+3. Allow ports 22, 8000, 9090 and 3000 from your own IP only.
+
+Then, from Git Bash in the project root, after training and creating `.env`:
 
 ```bash
-H=ec2-user@3.81.138.39
+H=ec2-user@<instance-ip>
 scp -r src artifacts requirements.txt Dockerfile .dockerignore docker-compose.yml monitoring .env $H:~/app/
 ssh $H "cd ~/app && sudo docker build -t edge-inference:1.0 . && sudo docker compose up -d --no-build"
 ```
 
-To tear everything down and stop billing:
+Set `MSYS_NO_PATHCONV=1` for any `aws` command in Git Bash, so it doesn't rewrite AWS paths such as `/aws/service/...`.
 
-```bash
-export MSYS_NO_PATHCONV=1
-aws ec2 terminate-instances --instance-ids i-05fdeb388164a394f
-aws ec2 wait instance-terminated --instance-ids i-05fdeb388164a394f
-aws ec2 delete-security-group --group-id sg-0dc4a94d524b24282
-aws ec2 delete-key-pair --key-name edge-inference
-```
+## Conclusion
+
+| Question | Answer from the measurements |
+|---|---|
+| Did compression cost accuracy? | No. 60 trees at depth 6 scored 0.9561 vs 0.9474 for 300 unrestricted trees, and the model is 6x smaller (63 KB vs 391 KB ONNX). |
+| Did ONNX conversion change predictions? | No. Labels agree 100%, probabilities differ by at most 4e-7, and CI blocks any build where that stops being true. |
+| Where does the memory go? | Mostly into the runtime. An ONNX-only process peaks at ~60 MB, against ~140 MB with scikit-learn loaded. |
+| Where does the latency go? | Mostly into queueing. Inference p95 is ~0.2 ms and server p95 is 9 ms, but client p95 is 190 ms at concurrency 16 on one worker (~285 req/s). |
+| Is it observable? | Yes. Request and inference latency, errors, predictions by class, CPU and memory are all on one Grafana dashboard. The `EdgeInferenceDown` alert went pending → firing → resolved in a live outage test. |
+
+Next steps, if the project continues:
+
+- Run one uvicorn worker per vCPU to cut queueing.
+- Add Alertmanager so alerts notify someone.
+- Add a promtool test for `InferenceLatencyP95High`.
+- Alert on a shift in the predicted-class ratio as a cheap drift signal.
 
 ## Environment notes
 
