@@ -1,0 +1,150 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/${{ github.repository_owner }}/edge-inference
+  PROMETHEUS_IMAGE: prom/prometheus:v3.5.0
+
+jobs:
+  model:
+    name: Train, validate, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Train models and export ONNX
+        run: python src/train_model.py
+
+      - name: Validate model artifacts
+        run: python -m src.validate_artifacts
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Benchmark and memory profile
+        run: |
+          python src/benchmark.py
+          python -m src.profile_memory
+          {
+            echo "## Benchmark"
+            echo '```'
+            python -c "import pandas as pd; pd.set_option('display.width', 250); print(pd.read_csv('reports/benchmark_results.csv').round(4).to_string(index=False))"
+            echo '```'
+            echo "## Memory (RSS, MB)"
+            echo '```'
+            python -c "import pandas as pd; pd.set_option('display.width', 250); print(pd.read_csv('reports/memory_results.csv').round(2).to_string(index=False))"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: model-artifacts
+          path: artifacts/
+          retention-days: 14
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: reports
+          path: reports/
+          retention-days: 14
+
+  monitoring-config:
+    name: Check Prometheus config and alert rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: promtool check config
+        run: |
+          docker run --rm -v "$PWD/monitoring/prometheus:/etc/prometheus:ro" \
+            --entrypoint promtool "$PROMETHEUS_IMAGE" \
+            check config /etc/prometheus/prometheus.yml
+
+      - name: promtool test rules
+        run: |
+          docker run --rm -v "$PWD/monitoring/prometheus:/etc/prometheus:ro" -w /etc/prometheus \
+            --entrypoint promtool "$PROMETHEUS_IMAGE" \
+            test rules alerts_test.yml
+
+      - name: Validate Grafana dashboard JSON
+        run: python3 -m json.tool monitoring/grafana/dashboards/edge-inference.json > /dev/null
+
+  container:
+    name: Build, smoke test, publish image
+    needs: [model, monitoring-config]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: model-artifacts
+          path: artifacts/
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install load-test dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build image
+        run: docker build -t edge-inference:ci .
+
+      - name: Start container and wait for health
+        run: |
+          docker run -d --name edge-inference -p 8000:8000 edge-inference:ci
+          for i in $(seq 1 30); do
+            status=$(docker inspect -f '{{.State.Health.Status}}' edge-inference)
+            echo "health: $status"
+            [ "$status" = "healthy" ] && exit 0
+            sleep 2
+          done
+          docker logs edge-inference
+          exit 1
+
+      - name: Smoke load test
+        run: |
+          python -m src.load_test --url http://127.0.0.1:8000 --label ci \
+            --requests 500 --concurrency 8 --runs 1 --max-error-rate 0
+          curl -sf http://127.0.0.1:8000/metrics | grep model_inference_duration_seconds_count
+
+      - name: Container logs
+        if: always()
+        run: docker logs edge-inference || true
+
+      - name: Log in to GHCR
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push image
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          docker tag edge-inference:ci "$IMAGE:${GITHUB_SHA::7}"
+          docker tag edge-inference:ci "$IMAGE:latest"
+          docker push "$IMAGE:${GITHUB_SHA::7}"
+          docker push "$IMAGE:latest"

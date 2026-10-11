@@ -1,0 +1,13 @@
+numpy
+scikit-learn==1.7.2  # 1.9.x DLL blocked by Windows Smart App Control
+pandas
+joblib
+skl2onnx
+onnx
+onnxruntime
+fastapi
+uvicorn[standard]
+httpx
+pytest
+psutil
+prometheus-client

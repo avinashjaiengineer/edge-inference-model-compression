@@ -1,0 +1,49 @@
+groups:
+  - name: edge-inference
+    rules:
+      # Server-side p95 for /predict. Normal is ~5 ms; 50 ms means the
+      # single worker is saturated or the host is starved for CPU.
+      - alert: PredictLatencyP95High
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(http_request_duration_seconds_bucket{job="edge-inference", path="/predict"}[1m]))
+          ) > 0.05
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "/predict p95 latency above 50 ms"
+          description: "p95 is {{ $value | humanizeDuration }} over the last minute."
+
+      # Model-only p95. ONNX Runtime normally answers in well under 1 ms.
+      - alert: InferenceLatencyP95High
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(model_inference_duration_seconds_bucket{job="edge-inference"}[1m]))
+          ) > 0.005
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Model inference p95 above 5 ms"
+          description: "ONNX Runtime p95 is {{ $value | humanizeDuration }}."
+
+      - alert: PredictErrorRateHigh
+        expr: |
+          sum(rate(http_requests_total{job="edge-inference", path="/predict", status=~"5.."}[5m]))
+            /
+          sum(rate(http_requests_total{job="edge-inference", path="/predict"}[5m]))
+          > 0.01
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "/predict 5xx error rate above 1%"
+
+      - alert: EdgeInferenceDown
+        expr: up{job="edge-inference"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Edge inference API is not being scraped"

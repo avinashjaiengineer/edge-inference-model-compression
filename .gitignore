@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# Model artifacts are rebuilt by src/train_model.py (and in CI).
+artifacts/
+
+# Secrets for docker compose (Grafana admin password).
+.env

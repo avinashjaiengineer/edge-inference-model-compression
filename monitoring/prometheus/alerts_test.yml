@@ -1,0 +1,77 @@
+# Unit tests for alerts.yml. Run with:
+#   promtool test rules monitoring/prometheus/alerts_test.yml
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 15s
+
+tests:
+  # Healthy traffic: all requests finish under 5 ms. No latency alert.
+  - interval: 15s
+    input_series:
+      - series: 'http_request_duration_seconds_bucket{job="edge-inference",path="/predict",method="POST",le="0.005"}'
+        values: '0+100x40'
+      - series: 'http_request_duration_seconds_bucket{job="edge-inference",path="/predict",method="POST",le="0.05"}'
+        values: '0+100x40'
+      - series: 'http_request_duration_seconds_bucket{job="edge-inference",path="/predict",method="POST",le="+Inf"}'
+        values: '0+100x40'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: PredictLatencyP95High
+        exp_alerts: []
+
+  # Slow traffic: half the requests take 50-100 ms. Alert fires after 2m.
+  - interval: 15s
+    input_series:
+      - series: 'http_request_duration_seconds_bucket{job="edge-inference",path="/predict",method="POST",le="0.005"}'
+        values: '0+50x40'
+      - series: 'http_request_duration_seconds_bucket{job="edge-inference",path="/predict",method="POST",le="0.05"}'
+        values: '0+50x40'
+      - series: 'http_request_duration_seconds_bucket{job="edge-inference",path="/predict",method="POST",le="0.1"}'
+        values: '0+100x40'
+      - series: 'http_request_duration_seconds_bucket{job="edge-inference",path="/predict",method="POST",le="+Inf"}'
+        values: '0+100x40'
+    alert_rule_test:
+      - eval_time: 1m
+        alertname: PredictLatencyP95High
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: PredictLatencyP95High
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "/predict p95 latency above 50 ms"
+              description: "p95 is 95ms over the last minute."
+
+  # 5% of requests return 500 for long enough to page.
+  - interval: 15s
+    input_series:
+      - series: 'http_requests_total{job="edge-inference",path="/predict",method="POST",status="200"}'
+        values: '0+95x40'
+      - series: 'http_requests_total{job="edge-inference",path="/predict",method="POST",status="500"}'
+        values: '0+5x40'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: PredictErrorRateHigh
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "/predict 5xx error rate above 1%"
+
+  # Scrape target down.
+  - interval: 15s
+    input_series:
+      - series: 'up{job="edge-inference",instance="api:8000"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: EdgeInferenceDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              job: edge-inference
+              instance: api:8000
+            exp_annotations:
+              summary: "Edge inference API is not being scraped"

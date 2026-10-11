@@ -1,0 +1,5 @@
+model,runtime,process_base_mb,runtime_import_mb,model_load_mb,inference_growth_mb,peak_rss_mb
+baseline,scikit-learn,19.8671875,118.98828125,3.49609375,0.0703125,142.421875
+baseline,ONNX Runtime,19.7890625,32.56640625,8.43359375,0.26953125,61.05859375
+compact,scikit-learn,19.4375,119.109375,0.71484375,0.3671875,139.62890625
+compact,ONNX Runtime,19.796875,32.52734375,7.234375,0.234375,59.79296875
